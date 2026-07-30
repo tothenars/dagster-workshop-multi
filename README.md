@@ -71,8 +71,8 @@ Code Locations, and materialize its assets — after materializing
 
 ## Demo
 
-<A screenshot or short GIF of the Dagster UI with your pipeline's assets
-materialized — the asset graph view or the run log both work well.>
+<img width="1917" height="970" alt="Cuplikan layar 2026-07-31 003753" src="https://github.com/user-attachments/assets/bbd6da9f-66a2-49f9-b42a-6d6e6b5b3a4d" />
+<img width="1917" height="962" alt="Cuplikan layar 2026-07-31 003802" src="https://github.com/user-attachments/assets/3ebaa0bc-12a1-43f6-b3f3-6d0c2ccba2a2" />
 
 ## What I'd do differently in production
 
