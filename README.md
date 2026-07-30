@@ -1,45 +1,33 @@
-# dagster-workshop-multi
+# pipeline_analytics
 
-A multi-container introduction to [Dagster](https://dagster.io) using the
-real production pattern: one Docker container per pipeline, each running its
-own Dagster gRPC code server, registered with a central webserver/daemon via
-`workspace.yaml`.
+A cross-pipeline analytics layer for the Dagster workshop: it joins order,
+product, FX, and ML-prediction data that three independent pipelines already
+loaded into the shared warehouse, and produces one daily summary table of
+predicted high-value orders with their EUR-converted totals.
 
-## Prerequisites
+Built on top of [dagster-workshop-multi](https://github.com/DanielAdif/dagster-workshop-multi),
+a multi-container Dagster workshop — see that repo's README for the base
+architecture (`pipeline_products`, `pipeline_fx`, `pipeline_ml`).
 
-- Docker Desktop (or Docker Engine + Docker Compose)
-- Internet access (`pipeline_products` and `pipeline_fx` call free public APIs)
+## What I built
 
-## Quickstart
+- **Track:** B: cross-pipeline analytics
+- **Data source:** no external API — reads the `orders`, `products`,
+  `exchange_rates`, and `order_value_predictions` tables that
+  `pipeline_products`, `pipeline_fx`, and `pipeline_ml` already write to the
+  shared `warehouse_postgresql` database.
+- **Key assets:**
+  - `daily_order_summary` — joins orders with products to compute each
+    order's USD total, converts it to EUR using the latest FX rate, and
+    attaches the ML pipeline's high-value prediction and probability.
+  - `daily_order_summary_table` — writes `daily_order_summary` to the
+    warehouse as the `daily_order_summary` table.
+- **Quality gate:** `daily_order_summary_has_no_missing_totals` fails if any
+  row is missing a `total_eur` value (i.e. the EUR conversion silently
+  dropped rows during the join). Zero tolerance was chosen because a missing
+  total means the row is unusable for the report, not just lower quality.
 
-```bash
-docker compose up --build
-```
-
-Then open http://localhost:3000. Under Deployment > Code Locations you should
-see `pipeline_products`, `pipeline_fx`, and `pipeline_ml`, each its own
-container. Select all assets and click "Materialize all" to run all three
-pipelines end to end — `pipeline_ml` trains on the data the other two just
-loaded, so it needs to run after them at least once.
-
-## Verifying a run
-
-- **In the UI:** every asset in the graph should turn green. A red asset
-  means its run failed — click it and open the run logs for the error.
-  `model_quality_check` (under `pipeline_ml`) should show a passing check;
-  a failing check means the trained model's accuracy dropped below the 0.6
-  threshold — click it in the Asset Checks panel to see the reported
-  accuracy.
-- **In the warehouse:** connect to the shared Postgres directly and confirm
-  data actually landed:
-  ```bash
-  docker compose exec warehouse_postgresql psql -U warehouse_user -d warehouse -c "\dt"
-  docker compose exec warehouse_postgresql psql -U warehouse_user -d warehouse -c "SELECT COUNT(*) FROM order_value_predictions;"
-  ```
-  You should see `products`, `orders`, `exchange_rates`, and
-  `order_value_predictions` tables, each with rows.
-
-## What just happened
+## Architecture
 
 ```
                      dagster_webserver (:3000)  <-- workspace.yaml -->  dagster_daemon
@@ -56,57 +44,42 @@ loaded, so it needs to run after them at least once.
   products, orders  ------------->  warehouse_postgresql  <-------------+
   tables                            (also: exchange_rates,
                                       order_value_predictions)
+                                             |
+                                             v
+                                  pipeline_analytics (:4003)
+                                  reads orders, products, exchange_rates,
+                                  and order_value_predictions -> joins them
+                                  into daily_order_summary
 ```
 
-Each pipeline is a fully independent container: its own `Dockerfile`, its own
-`requirements.txt`, its own source/db modules. They only share the
-`warehouse_postgresql` database as a landing zone — exactly like production's
-21 pipeline containers, each pulling from its own source system into one
-destination database. `pipeline_ml` is the odd one out: instead of pulling
-from an external API, it reads `pipeline_products`' tables straight out of
-the warehouse, trains a classifier, and writes predictions back — see
-[docs/mlops.md](docs/mlops.md) for why Dagster's asset/asset-check model
-fits that pattern too.
+`pipeline_analytics` is a fully independent container, same as the other
+three: its own `Dockerfile`, its own `requirements.txt`, its own `db.py`. It
+doesn't declare a Dagster-level dependency on the other pipelines — it just
+reads their output tables straight from `warehouse_postgresql`, the same
+landing-zone pattern `pipeline_fx`'s exercise ② uses.
 
-All three pipelines write with a simple truncate-and-load (`if_exists="replace"`)
-— a simplified stand-in for production's shift-based "check-then-insert"
-pattern.
-
-## Running the tests locally
-
-Each pipeline has its own test suite, independent of Docker — tests mock
-the external API calls and the warehouse connection, so no running database
-or containers are needed:
+## Running it
 
 ```bash
-cd pipeline_products && pip install -r requirements.txt && python -m pytest -v
-cd pipeline_fx && pip install -r requirements.txt && python -m pytest -v
-cd pipeline_ml && pip install -r requirements.txt && python -m pytest -v
+docker compose up --build
 ```
 
-## Exercises
+Open http://localhost:3000, find `pipeline_analytics` under Deployment >
+Code Locations, and materialize its assets — after materializing
+`pipeline_products`, `pipeline_fx`, and `pipeline_ml` at least once, since
+`daily_order_summary` reads their output tables.
 
-See [docs/exercises.md](docs/exercises.md) for three hands-on TODOs, in
-increasing difficulty. Each one has a `# TODO(exercise-N)` comment marking
-where to add your code.
+## Demo
 
-## Capstone
+<A screenshot or short GIF of the Dagster UI with your pipeline's assets
+materialized — the asset graph view or the run log both work well.>
 
-Once you've finished the three exercises, see
-[docs/capstone.md](docs/capstone.md) for a bigger, open-ended assignment:
-build and wire in your own pipeline, in your own fork, and turn it into a
-portfolio piece.
+## What I'd do differently in production
 
-## How this maps to the production pipeline
-
-This is adapted from a real Dagster + Docker production system with 21
-pipeline containers pulling manufacturing data (OEE, downtime, QC) from
-internal MSSQL/AS400 systems into a central SQL Server database. This
-workshop keeps the core architecture — one container per pipeline, gRPC code
-servers, `workspace.yaml` registration, a shared destination database — but
-swaps the internal systems for free public APIs, and drops production's
-`DockerRunLauncher` (which spawns a fresh container per run via a mounted
-`docker.sock`) in favor of Dagster's default run launcher, where runs execute
-in-process within each pipeline's own gRPC container. See
-`dagster-workshop-basic` for a single-container introduction to the core
-Dagster concepts before diving into this multi-container version.
+This does a full `if_exists="replace"` load every run instead of an
+incremental/upsert write, so `daily_order_summary` is rebuilt from scratch
+each time rather than only processing new orders. There's also no retry
+logic or alerting if an upstream table is temporarily unavailable — in
+production I'd add a sensor or freshness check so `pipeline_analytics`
+doesn't silently run against stale `order_value_predictions` if `pipeline_ml`
+failed earlier in the week.
